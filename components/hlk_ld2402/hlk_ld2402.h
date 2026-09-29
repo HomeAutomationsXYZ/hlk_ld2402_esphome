@@ -203,6 +203,23 @@ protected:
   bool get_parameters_batch_(const std::vector<uint16_t> &param_ids, std::vector<uint32_t> &values);
 
 private:
+  // Per-instance receive and diagnostic state.
+  uint32_t last_byte_time_{0};
+  uint32_t last_debug_time_{0};
+  uint32_t last_status_time_{0};
+  uint32_t byte_count_{0};
+  size_t last_byte_pos_{0};
+  bool firmware_check_done_{false};
+  bool power_check_done_{false};
+  uint32_t startup_time_{0};
+  uint32_t last_eng_debug_time_{0};
+  uint32_t eng_mode_start_time_{0};
+  uint32_t last_eng_retry_time_{0};
+  uint8_t eng_retry_count_{0};
+  uint32_t firmware_check_time_{0};
+  uint8_t last_bytes_[16]{};
+  float last_reported_distance_{0};
+
   // According to manual, response timeout should be 1s
   static const uint32_t RESPONSE_TIMEOUT_MS = 1000;
   

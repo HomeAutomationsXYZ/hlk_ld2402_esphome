@@ -15,7 +15,8 @@ api:
     key: !secret api_encryption_key
 
 ota:
-  password: !secret ota_password
+  - platform: esphome
+    password: !secret ota_password
 
 wifi:
   ssid: !secret wifi_ssid
@@ -28,6 +29,7 @@ wifi:
 
 logger:
   level: INFO
+  baud_rate: 0  # GPIO1/GPIO3 are used by the radar UART.
 
 # UART configuration for HLK-LD2402
 uart:
@@ -43,7 +45,7 @@ uart:
 external_components:
   - source:
       type: git
-      url: https://github.com/mouldybread/hlk_ld2402_esphome
+      url: https://github.com/HomeAutomationsXYZ/hlk_ld2402_esphome
     refresh: 0ms
 
 hlk_ld2402:

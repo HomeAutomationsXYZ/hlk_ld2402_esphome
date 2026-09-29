@@ -95,7 +95,7 @@ The HLK-LD2402 is a 24GHz millimeter-wave radar sensor from Hi-Link that can det
    external_components:
      - source:
          type: git
-         url: https://github.com/mouldybread/hlk_ld2402_esphome
+         url: https://github.com/HomeAutomationsXYZ/hlk_ld2402_esphome
        refresh: 0ms
    ```
 

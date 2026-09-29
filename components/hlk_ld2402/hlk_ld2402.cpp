@@ -16,10 +16,6 @@ void HLKLD2402Component::setup() {
   parent->set_data_bits(8);
   parent->set_parity(esphome::uart::UART_CONFIG_PARITY_NONE);
 
-  // Try sending some test data to verify TX functionality
-  write_str("TEST\n");
-  ESP_LOGI(TAG, "Sent test string to verify TX line");
-  delay(500);
   
   // Flush any residual data
   ESP_LOGI(TAG, "Flushing UART");
@@ -67,7 +63,7 @@ void HLKLD2402Component::setup() {
   ESP_LOGI(TAG, "Use the Engineering Mode button if you need to modify settings.");
   
   // Don't check power interference immediately - use a delayed operation
-  ESP_LOGI(TAG, "Will check power interference and firmware version after 60 seconds");
+  ESP_LOGD(TAG, "Will check firmware after 20 seconds, then power interference");
   
   // Remove the immediate firmware version check - it will happen after 60 seconds
   // get_firmware_version_();
@@ -86,6 +82,7 @@ void HLKLD2402Component::setup() {
   
   // Initialize the throttle timestamp to avoid updates right after boot
   last_distance_update_ = millis();
+  startup_time_ = millis();
 }
 
 // New function to passively monitor output for version info
@@ -183,70 +180,52 @@ void HLKLD2402Component::get_firmware_version_() {
 }
 
 void HLKLD2402Component::loop() {
-  static uint32_t last_byte_time = 0;
-  static uint32_t last_process_time = 0; // Add throttling timer
-  static const uint32_t PROCESS_INTERVAL = 2000; // Only process lines every 2 seconds
-  static const uint32_t TIMEOUT_MS = 100; // Reset buffer if no data for 100ms
-  static uint32_t last_debug_time = 0;
-  static uint8_t raw_buffer[16];
-  static size_t raw_pos = 0;
-  static uint32_t last_status_time = 0;
-  static uint32_t byte_count = 0;
-  static uint8_t last_bytes[16] = {0};
-  static size_t last_byte_pos = 0;
-  static bool firmware_check_done = false;
-  static bool power_check_done = false;
-  static uint32_t startup_time = millis();
-  static uint32_t last_eng_debug_time = 0;
-  static uint32_t eng_mode_start_time = 0;
-  static uint32_t last_eng_retry_time = 0;
-  static uint8_t eng_retry_count = 0;
-  static uint32_t firmware_check_time = 0;  // New variable to track when firmware check completes
-  
+  static const uint32_t TIMEOUT_MS = 100;
+
   // Firmware version check earlier at 20 seconds to avoid conflict with power check
-  if (!firmware_check_done && (millis() - startup_time) > 20000) {
+  if (!firmware_check_done_ && (millis() - startup_time_) > 20000) {
     ESP_LOGI(TAG, "Performing firmware version check...");
     get_firmware_version_();
-    firmware_check_done = true;
-    firmware_check_time = millis();  // Record when firmware check completes
+    firmware_check_done_ = true;
+    firmware_check_time_ = millis();  // Record when firmware check completes
   }
   
   // Power interference check 3 seconds after firmware check completes
-  if (firmware_check_done && !power_check_done && 
-      firmware_check_time > 0 && (millis() - firmware_check_time) > 3000) {
+  if (firmware_check_done_ && !power_check_done_ &&
+      firmware_check_time_ > 0 && (millis() - firmware_check_time_) > 3000) {
     ESP_LOGI(TAG, "Performing power interference check...");
     check_power_interference();
-    power_check_done = true;
+    power_check_done_ = true;
   }
   
   // Add periodic debug message - reduce frequency
-  if (millis() - last_debug_time > 30000) {  // Every 30 seconds
+  if (millis() - last_debug_time_ > 30000) {  // Every 30 seconds
     ESP_LOGD(TAG, "Waiting for data. Available bytes: %d", available());
-    last_debug_time = millis();
+    last_debug_time_ = millis();
   }
   
   // Every 10 seconds, report status
-  if (millis() - last_status_time > 10000) {
-    ESP_LOGI(TAG, "Status: received %u bytes in last 10 seconds", byte_count);
-    if (byte_count > 0) {
+  if (millis() - last_status_time_ > 10000) {
+    ESP_LOGD(TAG, "Status: received %u bytes in last 10 seconds", byte_count_);
+    if (byte_count_ > 0) {
       char hex_buf[50] = {0};
       char ascii_buf[20] = {0};
-      for (int i = 0; i < 16 && i < byte_count; i++) {
-        sprintf(hex_buf + (i*3), "%02X ", last_bytes[i]);
-        sprintf(ascii_buf + i, "%c", (last_bytes[i] >= 32 && last_bytes[i] < 127) ? last_bytes[i] : '.');
+      for (int i = 0; i < 16 && i < byte_count_; i++) {
+        sprintf(hex_buf + (i*3), "%02X ", last_bytes_[i]);
+        sprintf(ascii_buf + i, "%c", (last_bytes_[i] >= 32 && last_bytes_[i] < 127) ? last_bytes_[i] : '.');
       }
-      ESP_LOGI(TAG, "Last bytes (hex): %s", hex_buf);
-      ESP_LOGI(TAG, "Last bytes (ascii): %s", ascii_buf);
+      ESP_LOGD(TAG, "Last bytes (hex): %s", hex_buf);
+      ESP_LOGD(TAG, "Last bytes (ascii): %s", ascii_buf);
     }
-    byte_count = 0;
-    last_status_time = millis();
+    byte_count_ = 0;
+    last_status_time_ = millis();
   }
   
   // Add this at the beginning of the loop method
-  if (operating_mode_ == "Engineering" && (millis() - last_eng_debug_time) > 5000) {
+  if (operating_mode_ == "Engineering" && (millis() - last_eng_debug_time_) > 5000) {
     ESP_LOGI(TAG, "Currently in engineering mode, waiting for data frames. Data enabled: %s, Sensors configured: %d",
              engineering_data_enabled_ ? "YES" : "NO", energy_gate_sensors_.size());
-    last_eng_debug_time = millis();
+    last_eng_debug_time_ = millis();
   }
   
   // If we're in engineering mode, monitor if we're receiving data
@@ -254,17 +233,17 @@ void HLKLD2402Component::loop() {
     uint32_t now = millis();
     
     // Set the start time if not set
-    if (eng_mode_start_time == 0) {
-      eng_mode_start_time = now;
+    if (eng_mode_start_time_ == 0) {
+      eng_mode_start_time_ = now;
     }
     
     // Check if we're getting data in engineering mode
-    if ((now - last_status_time > 10000) && byte_count == 0) {
+    if (now - last_byte_time_ > 10000 && now - eng_mode_start_time_ > 10000) {
       // No bytes received in 10 seconds while in engineering mode
-      if (now - last_eng_retry_time > 15000 && eng_retry_count < 3) {
+      if (now - last_eng_retry_time_ > 15000 && eng_retry_count_ < 3) {
         // Try re-triggering engineering mode data every 15 seconds, up to 3 times
         ESP_LOGW(TAG, "No data received in engineering mode - attempting to re-trigger data flow (attempt %d/3)", 
-                eng_retry_count + 1);
+                eng_retry_count_ + 1);
         
         // Send a parameter read command which might trigger data flow
         uint8_t param_data[2];
@@ -273,24 +252,24 @@ void HLKLD2402Component::loop() {
         send_command_(CMD_GET_PARAMS, param_data, sizeof(param_data));
         
         // Increment retry counter and update timestamp
-        eng_retry_count++;
-        last_eng_retry_time = now;
+        eng_retry_count_++;
+        last_eng_retry_time_ = now;
       }
-      else if (eng_retry_count >= 3 && now - eng_mode_start_time > 60000) {
+      else if (eng_retry_count_ >= 3 && now - eng_mode_start_time_ > 60000) {
         // If we've been in engineering mode for over a minute with no data after 3 retries
         ESP_LOGW(TAG, "Engineering mode not producing data frames after multiple retries. Try power cycling the device.");
       }
     }
-    else if (byte_count > 0) {
+    else if (byte_count_ > 0) {
       // Reset retry counter if we got data
-      eng_retry_count = 0;
+      eng_retry_count_ = 0;
     }
   }
   else {
     // Reset engineering mode tracking variables when not in engineering mode
-    eng_mode_start_time = 0;
-    eng_retry_count = 0;
-    last_eng_retry_time = 0;
+    eng_mode_start_time_ = 0;
+    eng_retry_count_ = 0;
+    last_eng_retry_time_ = 0;
   }
   
   // Add this at the beginning of the loop method for additional safety
@@ -302,18 +281,12 @@ void HLKLD2402Component::loop() {
   while (available()) {
     uint8_t c;
     read_byte(&c);
-    last_byte_time = millis();
-    byte_count++;
+    last_byte_time_ = millis();
+    byte_count_++;
     
     // Record last bytes for diagnostics
-    last_bytes[last_byte_pos] = c;
-    last_byte_pos = (last_byte_pos + 1) % 16;
-    
-    // Debug: Collect raw data
-    raw_buffer[raw_pos++] = c;
-    if (raw_pos >= sizeof(raw_buffer)) {
-      raw_pos = 0;
-    }
+    last_bytes_[last_byte_pos_] = c;
+    last_byte_pos_ = (last_byte_pos_ + 1) % 16;
     
     // FIRST CHECK: Check for data frame header (F4 F3 F2 F1)
     if (c == DATA_FRAME_HEADER[0]) {
@@ -321,16 +294,21 @@ void HLKLD2402Component::loop() {
       if (available() >= 4) { // Need at least 4 more bytes to verify the header and frame type
         // Peek at the next 4 bytes to check for frame header and type
         bool is_data_frame = true;
-        uint8_t peek_bytes[4]; // Header + frame type
+        uint8_t peek_bytes[4]; // Consumed header bytes + frame type
+        size_t peek_count = 0;
         
-        // Read the next 4 bytes without removing them from buffer
+        // These reads consume bytes; retain only the bytes actually read.
         for (int i = 0; i < 4; i++) {
           if (!available()) {
             is_data_frame = false;
             break;
           }
           
-          read_byte(&peek_bytes[i]);
+          if (!read_byte(&peek_bytes[i])) {
+            is_data_frame = false;
+            break;
+          }
+          ++peek_count;
           
           // First 3 bytes should match header, 4th byte is frame type
           if (i < 3 && peek_bytes[i] != DATA_FRAME_HEADER[i+1]) {
@@ -399,9 +377,10 @@ void HLKLD2402Component::loop() {
         } else {
           // Not a valid data frame, add all read bytes to line buffer
           line_buffer_ += (char)c;
-          for (int i = 0; i < 4 && !is_data_frame; i++) {
+          for (size_t i = 0; i < peek_count; i++) {
             line_buffer_ += (char)peek_bytes[i];
           }
+          continue;
         }
       }
     }
@@ -412,50 +391,76 @@ void HLKLD2402Component::loop() {
       // ...existing code for checking command frame...
     }
     
+    // Additional processing in loop to passively detect version info
+    // from normal operation output, even after initial check
+    if (!firmware_version_.empty() && firmware_version_ != "Unknown" &&
+        firmware_version_.find("HLK-LD2402") == 0 &&
+        firmware_version_.find("v") == std::string::npos) {
+
+      // We only have model info, still looking for version number
+      if (c == '\n' && !line_buffer_.empty()) {
+        if (line_buffer_.find("v") != std::string::npos ||
+            line_buffer_.find("V") != std::string::npos ||
+            line_buffer_.find("version") != std::string::npos ||
+            line_buffer_.find("Version") != std::string::npos) {
+
+          ESP_LOGI(TAG, "Found potential version info: %s", line_buffer_.c_str());
+          // Extract version information
+          std::string version = "HLK-LD2402";
+
+          // Try to find version number pattern
+          for (size_t i = 0; i < line_buffer_.length(); i++) {
+            if ((i+2 < line_buffer_.length() &&
+                isdigit(static_cast<unsigned char>(line_buffer_[i])) &&
+                line_buffer_[i+1] == '.' &&
+                isdigit(static_cast<unsigned char>(line_buffer_[i+2]))) ||
+                ((line_buffer_[i] == 'v' || line_buffer_[i] == 'V') &&
+                 i + 1 < line_buffer_.length() &&
+                 isdigit(static_cast<unsigned char>(line_buffer_[i+1])))) {
+
+              size_t start_pos = line_buffer_[i] == 'v' || line_buffer_[i] == 'V' ? i+1 : i;
+              size_t end_pos = line_buffer_.find_first_not_of("0123456789.", start_pos);
+              if (end_pos == std::string::npos) end_pos = line_buffer_.length();
+
+              version = "v" + line_buffer_.substr(start_pos, end_pos - start_pos);
+              firmware_version_ = version;
+
+              if (firmware_version_text_sensor_ != nullptr) {
+                firmware_version_text_sensor_->publish_state(version);
+                ESP_LOGI(TAG, "Updated firmware version from passive detection: %s", version.c_str());
+              }
+              break;
+            }
+          }
+        }
+      }
+    }
+
     // Check for text data - add to line buffer
     if (c == '\n') {
       // Process complete line
       if (!line_buffer_.empty()) {
-        bool should_process = millis() - last_process_time >= PROCESS_INTERVAL;
-        
-        if (should_process) {
-          last_process_time = millis();
+        // Count once, using unsigned bytes consistently on all targets.
+        size_t binary_count = 0;
+        for (unsigned char ch : line_buffer_) {
+          if (ch < 32 && ch != '\t' && ch != '\r' && ch != '\n')
+            ++binary_count;
+        }
+        bool is_binary = binary_count > line_buffer_.length() / 4;
+
+        // Debug - show the line data regardless
+        ESP_LOGV(TAG, "Received line [%d bytes]: '%s'", line_buffer_.length(), line_buffer_.c_str());
+        if (!is_binary) {
+          process_line_(line_buffer_);
+        } else {
+          ESP_LOGD(TAG, "Skipped binary data that looks like a protocol frame");
           
-          // Less restrictive binary check - only look for obviously non-text chars
-          bool is_binary = false;
-          for (char ch : line_buffer_) {
-            // Only consider control chars below space as binary (except tab and CR)
-            if (ch < 32 && ch != '\t' && ch != '\r' && ch != '\n') {
-              // Count actual binary characters
-              int binary_count = 0;
-              for (char c2 : line_buffer_) {
-                if (c2 < 32 && c2 != '\t' && c2 != '\r' && c2 != '\n') {
-                  binary_count++;
-                }
-              }
-              
-              // Only mark as binary if we have several binary chars (>25%)
-              if (binary_count > line_buffer_.length() / 4) {
-                is_binary = true;
-                break;
-              }
-            }
+          // Debug: Show hex representation of binary data
+          char hex_buf[128] = {0};
+          for (size_t i = 0; i < std::min(line_buffer_.length(), size_t(32)); i++) {
+            sprintf(hex_buf + (i*3), "%02X ", (uint8_t)line_buffer_[i]);
           }
-          
-          // Debug - show the line data regardless
-          ESP_LOGI(TAG, "Received line [%d bytes]: '%s'", line_buffer_.length(), line_buffer_.c_str());
-          if (!is_binary) {
-            process_line_(line_buffer_);
-          } else {
-            ESP_LOGD(TAG, "Skipped binary data that looks like a protocol frame");
-            
-            // Debug: Show hex representation of binary data
-            char hex_buf[128] = {0};
-            for (size_t i = 0; i < std::min(line_buffer_.length(), size_t(32)); i++) {
-              sprintf(hex_buf + (i*3), "%02X ", (uint8_t)line_buffer_[i]);
-            }
-            ESP_LOGD(TAG, "Binary data hex: %s", hex_buf);
-          }
+          ESP_LOGD(TAG, "Binary data hex: %s", hex_buf);
         }
         line_buffer_.clear();
       }
@@ -481,57 +486,16 @@ void HLKLD2402Component::loop() {
       }
     }
     
-    // Additional processing in loop to passively detect version info
-    // from normal operation output, even after initial check
-    if (!firmware_version_.empty() && firmware_version_ != "Unknown" && 
-        firmware_version_.find("HLK-LD2402") == 0 && 
-        firmware_version_.find("v") == std::string::npos) {
-      
-      // We only have model info, still looking for version number
-      if (c == '\n' && !line_buffer_.empty()) {
-        if (line_buffer_.find("v") != std::string::npos || 
-            line_buffer_.find("V") != std::string::npos ||
-            line_buffer_.find("version") != std::string::npos ||
-            line_buffer_.find("Version") != std::string::npos) {
-          
-          ESP_LOGI(TAG, "Found potential version info: %s", line_buffer_.c_str());
-          // Extract version information
-          std::string version = "HLK-LD2402";
-          
-          // Try to find version number pattern
-          for (size_t i = 0; i < line_buffer_.length(); i++) {
-            if ((i+2 < line_buffer_.length() && 
-                isdigit(line_buffer_[i]) && 
-                line_buffer_[i+1] == '.' && 
-                isdigit(line_buffer_[i+2])) ||
-                (line_buffer_[i] == 'v' || line_buffer_[i] == 'V')) {
-              
-              size_t start_pos = line_buffer_[i] == 'v' || line_buffer_[i] == 'V' ? i+1 : i;
-              size_t end_pos = line_buffer_.find_first_not_of("0123456789.", start_pos);
-              if (end_pos == std::string::npos) end_pos = line_buffer_.length();
-              
-              version = "v" + line_buffer_.substr(start_pos, end_pos - start_pos);
-              firmware_version_ = version;
-              
-              if (firmware_version_text_sensor_ != nullptr) {
-                firmware_version_text_sensor_->publish_state(version);
-                ESP_LOGI(TAG, "Updated firmware version from passive detection: %s", version.c_str());
-              }
-              break;
-            }
-          }
-        }
-      }
-    }
+
   }
   
   // Reset buffer if no data received for a while
-  if (!line_buffer_.empty() && (millis() - last_byte_time > TIMEOUT_MS)) {
+  if (!line_buffer_.empty() && (millis() - last_byte_time_ > TIMEOUT_MS)) {
     line_buffer_.clear();
   }
 
   // Check calibration progress if needed
-  if (calibration_in_progress_ && calibration_progress_sensor_ != nullptr) {
+  if (calibration_in_progress_) {
     uint32_t now = millis();
     if (now - last_calibration_check_ >= 5000) { // Check every 5 seconds
       last_calibration_check_ = now;
@@ -606,7 +570,9 @@ void HLKLD2402Component::loop() {
               
               calibration_progress_ = progress;
               ESP_LOGI(TAG, "Calibration progress: %u%% (standard format)", progress);
-              this->calibration_progress_sensor_->publish_state(progress);
+              if (this->calibration_progress_sensor_ != nullptr) {
+                this->calibration_progress_sensor_->publish_state(progress);
+              }
               
               // Check if calibration is complete
               if (progress >= 100) {
@@ -715,12 +681,11 @@ bool HLKLD2402Component::process_distance_frame_(const std::vector<uint8_t> &fra
     
     // Only update distance sensor if not throttled
     if (!throttled && this->distance_sensor_ != nullptr) {
-      static float last_reported_distance = 0;
-      bool significant_change = fabsf(min_distance_cm - last_reported_distance) > 10.0f;
+      bool significant_change = fabsf(min_distance_cm - last_reported_distance_) > 10.0f;
       
       if (significant_change) {
         ESP_LOGI(TAG, "Detected %s at distance (binary): %.1f cm", status_text, min_distance_cm);
-        last_reported_distance = min_distance_cm;
+        last_reported_distance_ = min_distance_cm;
       } else {
         ESP_LOGV(TAG, "Detected %s at distance (binary): %.1f cm", status_text, min_distance_cm);
       }
@@ -1017,12 +982,11 @@ void HLKLD2402Component::process_line_(const std::string &line) {
     
     if (!throttled && this->distance_sensor_ != nullptr) {
       // Use verbose level for regular updates, INFO only for significant changes
-      static float last_reported_distance = 0;
-      bool significant_change = fabsf(distance_cm - last_reported_distance) > 10.0f;
+      bool significant_change = fabsf(distance_cm - last_reported_distance_) > 10.0f;
       
       if (significant_change) {
         ESP_LOGI(TAG, "Detected distance (text): %.1f cm", distance_cm);
-        last_reported_distance = distance_cm;
+        last_reported_distance_ = distance_cm;
       } else {
         ESP_LOGV(TAG, "Detected distance (text): %.1f cm", distance_cm);
       }
