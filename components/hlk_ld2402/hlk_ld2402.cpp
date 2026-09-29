@@ -255,9 +255,11 @@ void HLKLD2402Component::loop() {
         eng_retry_count_++;
         last_eng_retry_time_ = now;
       }
-      else if (eng_retry_count_ >= 3 && now - eng_mode_start_time_ > 60000) {
+      else if (eng_retry_count_ >= 3 && now - eng_mode_start_time_ > 60000 &&
+               now - last_eng_retry_time_ > 15000) {
         // If we've been in engineering mode for over a minute with no data after 3 retries
         ESP_LOGW(TAG, "Engineering mode not producing data frames after multiple retries. Try power cycling the device.");
+        last_eng_retry_time_ = now;
       }
     }
     else if (byte_count_ > 0) {
