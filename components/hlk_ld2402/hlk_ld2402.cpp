@@ -1385,6 +1385,11 @@ void HLKLD2402Component::set_engineering_mode_direct() {
 
 // New method for directly setting normal mode without toggle logic
 void HLKLD2402Component::set_normal_mode_direct() {
+  // A failed config exit must remain recoverable even if the output mode was Normal.
+  if (config_mode_ && operating_mode_ == "Normal") {
+    exit_config_verified_();
+    return;
+  }
   // Check if already in normal mode to avoid unnecessary actions
   if (operating_mode_ == "Normal") {
     ESP_LOGI(TAG, "Already in normal mode. No action needed.");
@@ -2183,6 +2188,23 @@ bool HLKLD2402Component::get_parameters_batch_(const std::vector<uint16_t> &para
   return true;
 }
 
+bool HLKLD2402Component::exit_config_verified_() {
+  // A save ACK may precede readiness for another command. Retry exit only, never save.
+  for (unsigned attempt = 0; attempt < 3; attempt++) {
+    if (attempt != 0) delay(250);
+    std::vector<uint8_t> payload;
+    if (send_command_(CMD_DISABLE_CONFIG) && read_command_reply_(CMD_DISABLE_CONFIG, payload) && payload.empty()) {
+      config_mode_ = false;
+      ESP_LOGI(TAG, "Configuration exit confirmed");
+      return true;
+    }
+    ESP_LOGW(TAG, "Configuration exit attempt %u failed", attempt + 1);
+  }
+  config_mode_ = true;
+  ESP_LOGW(TAG, "Configuration exit unconfirmed; select Normal mode to retry, or power-cycle the radar");
+  return false;
+}
+
 bool HLKLD2402Component::apply_detection_settings() {
   if (calibration_in_progress_ || config_mode_ || operating_mode_ != "Normal") {
     ESP_LOGW(TAG, "Apply settings requires idle Normal mode");
@@ -2218,8 +2240,7 @@ bool HLKLD2402Component::apply_detection_settings() {
       if (success) ESP_LOGI(TAG, "Save to flash acknowledged (saves current radar configuration)");
     }
   }
-  const bool exited = send_command_(CMD_DISABLE_CONFIG) && read_command_reply_(CMD_DISABLE_CONFIG, payload);
-  config_mode_ = !exited;
+  const bool exited = exit_config_verified_();
   ESP_LOGI(TAG, "APPLY DETECTION SETTINGS END: %s; config exit %s",
            success ? "verified and saved" : "FAILED; settings may have changed, inspect diagnostics", exited ? "confirmed" : "FAILED");
   return success && exited;
@@ -2258,8 +2279,7 @@ bool HLKLD2402Component::read_radar_diagnostics() {
     }
   }
   // Attempt exit even after an entry ACK timeout: the radar may have received entry.
-  const bool exited = send_command_(CMD_DISABLE_CONFIG) && read_command_reply_(CMD_DISABLE_CONFIG, payload);
-  config_mode_ = !exited;
+  const bool exited = exit_config_verified_();
   ESP_LOGI(TAG, "RADAR DIAGNOSTICS END: %s; config exit %s",
            success ? "read complete" : "read FAILED", exited ? "confirmed" : "FAILED");
   return success && exited;

@@ -97,3 +97,10 @@ and `config exit confirmed`, then run diagnostics. Failed operations can leave
 partially changed settings; inspect diagnostics before retrying. A power-cycle and
 another readback are needed to independently confirm persistence. It does not run
 on boot, so installing firmware alone does not overwrite radar settings.
+
+
+Configuration exit is retried up to three times if its ACK is missing. These retries
+only send exit commands, never repeat writes or saves. If exit remains unconfirmed,
+**Normal Mode** retries exit even when the cached output mode is already Normal.
+Missing exit ACKs can block the action for about 3.5 seconds; this recovery path is
+still synchronous. A save ACK alone does not prove post-power-cycle persistence.

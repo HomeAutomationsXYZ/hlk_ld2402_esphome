@@ -148,7 +148,7 @@ void test_diagnostics(bool fail_read, bool fail_exit) {
   assert(radar.read_radar_diagnostics() == (!fail_read && !fail_exit));
   assert(radar.tx.back()[6] == CMD_DISABLE_CONFIG);
   assert(radar.config_mode_ == fail_exit);
-  assert(radar.tx.size() == (fail_read ? 3 : 7));
+  assert(radar.tx.size() == (fail_read ? 3 : 7) + (fail_exit ? 2 : 0));
   radar.tx.clear();
   radar.calibration_in_progress_ = true;
   assert(!radar.read_radar_diagnostics() && radar.tx.empty());
@@ -208,8 +208,24 @@ void test_apply_settings(int failure) {
   assert(!radar.apply_detection_settings() && radar.tx.empty());
 }
 
+void test_exit_retry_and_recovery() {
+  HLKLD2402Component radar;
+  radar.config_mode_ = true;
+  radar.operating_mode_ = "Normal";
+  unsigned attempts = 0;
+  radar.on_write = [&](const std::vector<uint8_t> &frame) {
+    assert(frame[6] == CMD_DISABLE_CONFIG); // Recovery must not re-save or rewrite settings.
+    if (++attempts == 2) radar.feed(reply(CMD_DISABLE_CONFIG, {}));
+  };
+  radar.set_normal_mode_direct();
+  assert(attempts == 2 && !radar.config_mode_);
+  radar.set_normal_mode_direct();
+  assert(attempts == 2);
+}
+
 int main() {
   for (int failure = 0; failure < 5; failure++) test_apply_settings(failure);
+  test_exit_retry_and_recovery();
   test_parameter_readback();
   test_active_version();
   test_diagnostic_entry_failure();
@@ -221,5 +237,5 @@ int main() {
   test_passive_version();
   for (bool sensor : {false, true})
     for (bool legacy : {false, true}) test_calibration(sensor, legacy);
-  std::cout << "All 20 component regression cases passed.\n";
+  std::cout << "All 21 component regression cases passed.\n";
 }
