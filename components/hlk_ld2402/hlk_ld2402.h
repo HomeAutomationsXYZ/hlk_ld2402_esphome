@@ -124,6 +124,7 @@ public:
   void dump_config() override;
   
   bool read_radar_diagnostics();
+  bool apply_detection_settings();
   void calibrate();
   void save_config();
   void enable_auto_gain();
@@ -176,7 +177,7 @@ protected:
   bool read_response_(std::vector<uint8_t> &response, uint32_t timeout_ms = 1000);  // Added timeout parameter
   bool set_parameter_(uint16_t param_id, uint32_t value);
   bool get_parameter_(uint16_t param_id, uint32_t &value);
-  bool read_command_reply_(uint16_t command, std::vector<uint8_t> &payload);
+  bool read_command_reply_(uint16_t command, std::vector<uint8_t> &payload, uint32_t timeout_ms = 1000);
   bool set_work_mode_(uint32_t mode);
   bool set_work_mode_with_timeout_(uint32_t mode, uint32_t timeout_ms);  // New method with timeout
   void process_line_(const std::string &line);

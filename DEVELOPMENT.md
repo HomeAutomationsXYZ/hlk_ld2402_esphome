@@ -84,3 +84,16 @@ firmware queries use this stricter reader; older command paths still use the leg
 For template threshold numbers, use `set_action` and its `x` value to write only on
 explicit user changes. Do not attach writes to `on_value`, which also runs when
 publishing a number's state. Read buttons should update threshold sensors only.
+
+
+## Apply distance and timeout
+
+Press **Apply Detection Settings** once in idle Normal mode to program the YAML
+`max_distance` (rounded to 0.1 m) and `timeout` (seconds). It validates the write ACK,
+reads both values back, and only saves to flash if they match. Save commits the
+radar's current configuration, including its existing thresholds; this action does
+not write threshold parameters or run calibration. Check for `verified and saved`
+and `config exit confirmed`, then run diagnostics. Failed operations can leave
+partially changed settings; inspect diagnostics before retrying. A power-cycle and
+another readback are needed to independently confirm persistence. It does not run
+on boot, so installing firmware alone does not overwrite radar settings.

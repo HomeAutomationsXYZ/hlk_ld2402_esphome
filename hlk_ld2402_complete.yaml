@@ -595,6 +595,12 @@ text_sensor:
 # Control buttons - using template buttons 
 button:
   - platform: template
+    name: "Apply Detection Settings"
+    entity_category: config
+    on_press:
+      - lambda: id(radar_sensor).apply_detection_settings();
+
+  - platform: template
     name: "Read Radar Diagnostics"
     entity_category: diagnostic
     on_press:

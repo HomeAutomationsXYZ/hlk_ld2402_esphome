@@ -174,7 +174,42 @@ void test_active_version() {
   assert(radar.firmware_version_ == "v3.3.5");
 }
 
+void test_apply_settings(int failure) {
+  HLKLD2402Component radar;
+  radar.set_max_distance(3.5f);
+  radar.set_timeout(5);
+  bool saved = false;
+  radar.on_write = [&](const std::vector<uint8_t> &frame) {
+    const uint16_t cmd = frame[6];
+    assert(cmd == CMD_ENABLE_CONFIG || cmd == CMD_DISABLE_CONFIG || cmd == CMD_SET_PARAMS ||
+           cmd == CMD_GET_PARAMS || cmd == CMD_SAVE_PARAMS);
+    if (cmd == CMD_SET_PARAMS) {
+      const std::vector<uint8_t> data(frame.begin()+8, frame.end()-4);
+      assert(data == std::vector<uint8_t>({1,0,35,0,0,0,4,0,5,0,0,0}));
+    }
+    if (cmd == CMD_GET_PARAMS) {
+      radar.feed(reply(cmd, {uint8_t(failure == 2 ? 85 : 35),0,0,0,5,0,0,0}));
+    } else {
+      if (cmd == CMD_SAVE_PARAMS) saved = true;
+      if (failure == 4 && cmd == CMD_DISABLE_CONFIG) return;
+      radar.feed(reply(cmd, {}, ((failure == 1 && cmd == CMD_SET_PARAMS) ||
+                                (failure == 3 && cmd == CMD_SAVE_PARAMS)) ? 1 : 0));
+    }
+  };
+  assert(radar.apply_detection_settings() == (failure == 0));
+  assert(saved == (failure != 1 && failure != 2));
+  assert(radar.tx.back()[6] == CMD_DISABLE_CONFIG);
+  assert(radar.config_mode_ == (failure == 4));
+  radar.tx.clear();
+  radar.set_max_distance(11);
+  assert(!radar.apply_detection_settings() && radar.tx.empty());
+  radar.set_max_distance(3.5f);
+  radar.calibration_in_progress_ = true;
+  assert(!radar.apply_detection_settings() && radar.tx.empty());
+}
+
 int main() {
+  for (int failure = 0; failure < 5; failure++) test_apply_settings(failure);
   test_parameter_readback();
   test_active_version();
   test_diagnostic_entry_failure();
@@ -186,5 +221,5 @@ int main() {
   test_passive_version();
   for (bool sensor : {false, true})
     for (bool legacy : {false, true}) test_calibration(sensor, legacy);
-  std::cout << "All 15 component regression cases passed.\n";
+  std::cout << "All 20 component regression cases passed.\n";
 }

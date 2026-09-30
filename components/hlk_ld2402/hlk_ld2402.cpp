@@ -1107,13 +1107,13 @@ bool HLKLD2402Component::get_parameter_(uint16_t param_id, uint32_t &value) {
 }
 
 // Length-delimited command replies. Payload bytes may contain the frame footer.
-bool HLKLD2402Component::read_command_reply_(uint16_t command, std::vector<uint8_t> &payload) {
+bool HLKLD2402Component::read_command_reply_(uint16_t command, std::vector<uint8_t> &payload, uint32_t timeout_ms) {
   payload.clear();
   const uint32_t start = millis();
   uint8_t matched = 0;
   std::vector<uint8_t> frame;
   size_t expected = 0;
-  while (millis() - start < 1000) {
+  while (millis() - start < timeout_ms) {
     if (!available()) { yield(); continue; }
     uint8_t c;
     if (!read_byte(&c)) continue;
@@ -2181,6 +2181,48 @@ bool HLKLD2402Component::get_parameters_batch_(const std::vector<uint16_t> &para
   }
   values.swap(decoded);
   return true;
+}
+
+bool HLKLD2402Component::apply_detection_settings() {
+  if (calibration_in_progress_ || config_mode_ || operating_mode_ != "Normal") {
+    ESP_LOGW(TAG, "Apply settings requires idle Normal mode");
+    return false;
+  }
+  if (!std::isfinite(max_distance_) || max_distance_ < 0.7f || max_distance_ > 10.0f || timeout_ > 65535) {
+    ESP_LOGE(TAG, "Invalid detection settings: distance must be 0.7-10 m, timeout 0-65535 s");
+    return false;
+  }
+  const uint32_t distance = uint32_t(roundf(max_distance_ * 10.0f));
+  while (available()) { uint8_t c; read_byte(&c); }
+  ESP_LOGI(TAG, "APPLY DETECTION SETTINGS BEGIN: %.1f m, %lu s", distance / 10.0f, (unsigned long) timeout_);
+  std::vector<uint8_t> payload;
+  bool success = send_command_(CMD_ENABLE_CONFIG) && read_command_reply_(CMD_ENABLE_CONFIG, payload);
+  if (success) {
+    config_mode_ = true;
+    // Only these two parameters are written. Thresholds are not regenerated or changed.
+    std::vector<uint8_t> data;
+    const uint16_t ids[] = {PARAM_MAX_DISTANCE, PARAM_TIMEOUT};
+    const uint32_t requested[] = {distance, timeout_};
+    for (size_t i = 0; i < 2; i++) {
+      data.push_back(ids[i] & 0xFF); data.push_back(ids[i] >> 8);
+      for (size_t byte = 0; byte < 4; byte++) data.push_back(uint8_t(requested[i] >> (byte * 8)));
+    }
+    success = send_command_(CMD_SET_PARAMS, data.data(), data.size()) &&
+              read_command_reply_(CMD_SET_PARAMS, payload) && payload.empty();
+    std::vector<uint32_t> actual;
+    if (success) success = get_parameters_batch_({PARAM_MAX_DISTANCE, PARAM_TIMEOUT}, actual);
+    if (success) success = actual[0] == distance && actual[1] == timeout_;
+    if (success) {
+      ESP_LOGI(TAG, "Hardware readback verified: %.1f m, %lu s", distance / 10.0f, (unsigned long) timeout_);
+      success = send_command_(CMD_SAVE_PARAMS) && read_command_reply_(CMD_SAVE_PARAMS, payload, 3000) && payload.empty();
+      if (success) ESP_LOGI(TAG, "Save to flash acknowledged (saves current radar configuration)");
+    }
+  }
+  const bool exited = send_command_(CMD_DISABLE_CONFIG) && read_command_reply_(CMD_DISABLE_CONFIG, payload);
+  config_mode_ = !exited;
+  ESP_LOGI(TAG, "APPLY DETECTION SETTINGS END: %s; config exit %s",
+           success ? "verified and saved" : "FAILED; settings may have changed, inspect diagnostics", exited ? "confirmed" : "FAILED");
+  return success && exited;
 }
 
 bool HLKLD2402Component::read_radar_diagnostics() {
