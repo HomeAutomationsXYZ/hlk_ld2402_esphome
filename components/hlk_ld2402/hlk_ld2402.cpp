@@ -280,6 +280,10 @@ void HLKLD2402Component::loop() {
     engineering_data_enabled_ = false;
   }
   
+  if (!report_buffer_.empty() && millis() - last_byte_time_ > 100) {
+    ESP_LOGW(TAG, "Discarding incomplete radar report");
+    report_buffer_.clear();
+  }
   while (available()) {
     uint8_t c;
     read_byte(&c);
@@ -290,105 +294,30 @@ void HLKLD2402Component::loop() {
     last_bytes_[last_byte_pos_] = c;
     last_byte_pos_ = (last_byte_pos_ + 1) % 16;
     
-    // FIRST CHECK: Check for data frame header (F4 F3 F2 F1)
-    if (c == DATA_FRAME_HEADER[0]) {
-      // Need to check if this is actually a data frame
-      if (available() >= 4) { // Need at least 4 more bytes to verify the header and frame type
-        // Peek at the next 4 bytes to check for frame header and type
-        bool is_data_frame = true;
-        uint8_t peek_bytes[4]; // Consumed header bytes + frame type
-        size_t peek_count = 0;
-        
-        // These reads consume bytes; retain only the bytes actually read.
-        for (int i = 0; i < 4; i++) {
-          if (!available()) {
-            is_data_frame = false;
-            break;
-          }
-          
-          if (!read_byte(&peek_bytes[i])) {
-            is_data_frame = false;
-            break;
-          }
-          ++peek_count;
-          
-          // First 3 bytes should match header, 4th byte is frame type
-          if (i < 3 && peek_bytes[i] != DATA_FRAME_HEADER[i+1]) {
-            is_data_frame = false;
-            break;
-          }
-        }
-        
-        if (is_data_frame) {
-          // We have a proper data frame header! Collect the whole frame
-          // The 4th byte is the frame type (0x83 for distance data, 0x84 for engineering data)
-          uint8_t frame_type = peek_bytes[3];
-          
-          // Add more verbose logging for engineering mode
-          if (operating_mode_ == "Engineering") {
-            ESP_LOGI(TAG, "In engineering mode, received frame type: 0x%02X", frame_type);
-          }
-          
-          std::vector<uint8_t> frame_data;
-          
-          // Add first 5 bytes (4 header + frame type)
-          frame_data.push_back(c);  // First byte (already read)
-          for (int i = 0; i < 4; i++) {
-            frame_data.push_back(peek_bytes[i]);
-          }
-          
-          // Read up to 100 bytes to capture the entire frame
-          // This limit is just a safety mechanism - we'll read until we have a complete frame
-          size_t max_frame_size = 100;
-          size_t bytes_read = 0;
-          
-          while (available() && bytes_read < max_frame_size) {
-            uint8_t data_byte;
-            read_byte(&data_byte);
-            frame_data.push_back(data_byte);
-            bytes_read++;
-          }
-          
-          // Process the data frame based on frame_type with additional checks
-          if (frame_type == DATA_FRAME_TYPE_DISTANCE) {
-            // MODIFICATION: If in engineering mode, process 0x83 frames as engineering data
-            if (operating_mode_ == "Engineering") {
-              ESP_LOGI(TAG, "Processing distance frame (0x83) as engineering data in engineering mode");
-              if (process_engineering_from_distance_frame_(frame_data)) {
-                // Successfully processed as engineering data
-                ESP_LOGD(TAG, "Successfully processed 0x83 frame as engineering data");
-              } else {
-                ESP_LOGW(TAG, "Failed to process 0x83 frame as engineering data");
-              }
-            } else if (process_distance_frame_(frame_data)) {
-              // Successfully processed as normal distance frame
-            } else {
-              ESP_LOGW(TAG, "Failed to process distance data frame");
-            }
-          } else if (frame_type == DATA_FRAME_TYPE_ENGINEERING) {
-            if (process_engineering_data_(frame_data)) {
-              ESP_LOGD(TAG, "Successfully processed engineering data frame");
-            } else {
-              ESP_LOGV(TAG, "Failed to process engineering data frame");
-            }
-          } else {
-            ESP_LOGD(TAG, "Unknown frame type: 0x%02X", frame_type);
-          }
-          
-          continue; // Skip further processing for this byte
+    // Keep partial binary reports across loop calls; do not consume adjacent frames.
+    if (!report_buffer_.empty() || c == DATA_FRAME_HEADER[0]) {
+      report_buffer_.push_back(c);
+      const size_t n = report_buffer_.size();
+      if (n <= 4 && c != DATA_FRAME_HEADER[n - 1]) {
+        if (c == DATA_FRAME_HEADER[0]) {
+          line_buffer_.append(report_buffer_.begin(), report_buffer_.end() - 1);
+          report_buffer_.assign(1, c);
         } else {
-          // Not a valid data frame, add all read bytes to line buffer
-          line_buffer_ += (char)c;
-          for (size_t i = 0; i < peek_count; i++) {
-            line_buffer_ += (char)peek_bytes[i];
-          }
-          continue;
+          line_buffer_.append(report_buffer_.begin(), report_buffer_.end());
+          report_buffer_.clear();
         }
+      } else if (n == 6 && (report_buffer_[4] != 131 || report_buffer_[5] != 0)) {
+        ESP_LOGW(TAG, "Unsupported radar report length");
+        report_buffer_.clear();
+      } else if (n == 141) {
+        process_report_(report_buffer_);
+        report_buffer_.clear();
       }
+      continue;
     }
-    
+
     // SECOND CHECK: Check for command/response frame header (FD FC FB FA)
-    else if (c == FRAME_HEADER[0]) {
+    if (c == FRAME_HEADER[0]) {
       // Only consider it a frame header if we have enough bytes available
       // ...existing code for checking command frame...
     }
@@ -605,288 +534,46 @@ void HLKLD2402Component::loop() {
 }
 
 // Add new method to parse distance data frames
-bool HLKLD2402Component::process_distance_frame_(const std::vector<uint8_t> &frame_data) {
-  // Regular distance frame processing for normal mode
-  // Ensure the frame is at least the minimum expected length
-  if (frame_data.size() < 10) {
-    ESP_LOGW(TAG, "Distance frame too short: %d bytes", frame_data.size());
-    return false;
-  }
-  
-  // Additional verification: double-check that this is really a distance frame
-  // by confirming the frame type byte (should be 0x83)
-  if (frame_data.size() >= 5 && frame_data[4] != DATA_FRAME_TYPE_DISTANCE) {
-    ESP_LOGW(TAG, "Not a distance frame type: 0x%02X", frame_data[4]);
-    return false;
-  }
-  
-  // Parse the data length from the frame
-  uint16_t data_length = frame_data[6] | (frame_data[7] << 8);
-  
-  // Check if we have at least enough data for distance values
-  if (frame_data.size() < 14) {
-    ESP_LOGW(TAG, "Frame too short to contain distance data");
-    return false;
-  }
-  
-  // We'll use the first non-zero value as our distance
-  float min_distance_cm = 0;
-  
-  // Start at byte 13 (index 12) and look for the first valid distance
-  for (size_t i = 12; i + 3 < frame_data.size(); i += 4) {
-    uint32_t value = frame_data[i] | 
-                    (frame_data[i+1] << 8) | 
-                    (frame_data[i+2] << 16) | 
-                    (frame_data[i+3] << 24);
-                    
-    // If the value is non-zero, convert to distance
-    if (value > 0) {
-      float distance = value * 0.1f; // Convert to cm
-      
-      // If this is the first valid value, or it's closer than our current minimum
-      if (min_distance_cm == 0 || distance < min_distance_cm) {
-        min_distance_cm = distance;
-      }
-      
-      ESP_LOGV(TAG, "Distance value at pos %d: %.1f cm", i, distance);
-      
-      // Find just one valid value, then break
-      if (min_distance_cm > 0) {
-        break;
-      }
+// LD2402 V1.08 section 5.5: 4-byte header, LE16 payload length,
+// status, LE16 distance in cm, 16 motion + 16 micro/static LE32 energies, footer.
+bool HLKLD2402Component::process_report_(const std::vector<uint8_t> &frame) {
+  if (frame.size() != 141 || frame[4] != 131 || frame[5] != 0) return false;
+  for (size_t i = 0; i < 4; i++) {
+    if (frame[i] != DATA_FRAME_HEADER[i] || frame[137+i] != 0xF8-i) {
+      ESP_LOGW(TAG, "Invalid radar report framing");
+      return false;
     }
   }
-  
-  // If we found a valid distance
-  if (min_distance_cm > 0) {
-    // Extract the detection status from the frame data
-    uint8_t detection_status = 0;
-    if (frame_data.size() >= 9) {
-      detection_status = frame_data[8];
-    }
-    
-    // Log with more detailed status information
-    const char* status_text = "unknown";
-    switch(detection_status) {
-      case 0: status_text = "no person"; break;
-      case 1: status_text = "person"; break;
-      case 2: status_text = "stationary person"; break;
-    }
-    
-    // Always update binary sensors (no throttling needed)
-    update_binary_sensors_(min_distance_cm);
-    
-    // For distance sensor, check throttling
-    uint32_t now = millis();
-    bool throttled = (this->distance_sensor_ != nullptr && 
-                     now - last_distance_update_ < distance_throttle_ms_);
-    
-    // Only update distance sensor if not throttled
-    if (!throttled && this->distance_sensor_ != nullptr) {
-      bool significant_change = fabsf(min_distance_cm - last_reported_distance_) > 10.0f;
-      
-      if (significant_change) {
-        ESP_LOGI(TAG, "Detected %s at distance (binary): %.1f cm", status_text, min_distance_cm);
-        last_reported_distance_ = min_distance_cm;
-      } else {
-        ESP_LOGV(TAG, "Detected %s at distance (binary): %.1f cm", status_text, min_distance_cm);
-      }
-      
-      this->distance_sensor_->publish_state(min_distance_cm);
-      last_distance_update_ = now;
-      ESP_LOGD(TAG, "Updated distance sensor");
-    }
-    
-    return true;
+  const uint8_t status = frame[6];
+  if (status > 2) { ESP_LOGW(TAG, "Unknown radar detection status %u", status); return false; }
+  const uint16_t distance = uint16_t(frame[7]) | (uint16_t(frame[8]) << 8);
+  if (presence_binary_sensor_) presence_binary_sensor_->publish_state(status != 0);
+  // In binary reports only, status 2 explicitly identifies a stationary target.
+  if (micromovement_binary_sensor_) micromovement_binary_sensor_->publish_state(status == 2);
+  const uint32_t now = millis();
+  if (distance_sensor_ && now - last_distance_update_ >= distance_throttle_ms_) {
+    distance_sensor_->publish_state(status == 0 ? 0 : distance);
+    last_distance_update_ = now;
   }
-  
-  return false;  // No valid distance found
-}
-
-// Add new method to process engineering data from 0x83 frames
-bool HLKLD2402Component::process_engineering_from_distance_frame_(const std::vector<uint8_t> &frame_data) {
-  // Early exit if engineering data processing is not enabled
-  if (!engineering_data_enabled_) {
-    ESP_LOGD(TAG, "Engineering data processing disabled");
-    return false;
+  if (now - last_engineering_update_ < engineering_throttle_ms_) return true;
+  last_engineering_update_ = now;
+  ESP_LOGI(TAG, "RADAR ENERGY status=%u distance_cm=%u (0=absent,1=present,2=stationary)", status, distance);
+  for (size_t gate = 0; gate < 16; gate++) {
+    const size_t m = 9 + gate * 4, u = 73 + gate * 4;
+    const auto read32 = [&](size_t i) {
+      return uint32_t(frame[i]) | (uint32_t(frame[i+1]) << 8) |
+             (uint32_t(frame[i+2]) << 16) | (uint32_t(frame[i+3]) << 24);
+    };
+    const uint32_t motion = read32(m), micro = read32(u);
+    const float motion_db = threshold_to_db_(motion), micro_db = threshold_to_db_(micro);
+    ESP_LOGI(TAG, "ENERGY gate=%u motion_raw=%lu motion_db=%.2f micro_raw=%lu micro_db=%.2f",
+             unsigned(gate), (unsigned long)motion, motion_db, (unsigned long)micro, micro_db);
+    if (gate < energy_gate_sensors_.size() && energy_gate_sensors_[gate])
+      energy_gate_sensors_[gate]->publish_state(motion_db);
   }
-  
-  if (energy_gate_sensors_.empty()) {
-    ESP_LOGD(TAG, "No energy gate sensors configured");
-    return false;
-  }
-  
-  // Ensure the frame is at least the minimum expected length
-  // Header (5) + Length (2) + Some data
-  if (frame_data.size() < 10) {
-    ESP_LOGW(TAG, "Engineering frame too short: %d bytes", frame_data.size());
-    return false;
-  }
-  
-  // Check throttling - only log and update sensors if enough time has passed
-  uint32_t now = millis();
-  bool throttled = (now - last_engineering_update_ < engineering_throttle_ms_);
-  
-  if (!throttled) {
-    // Only log the frame when not throttled
-    char hex_buf[256] = {0};
-    for (size_t i = 0; i < std::min(frame_data.size(), size_t(50)); i++) {
-      sprintf(hex_buf + (i*3), "%02X ", frame_data[i]);
-    }
-    ESP_LOGI(TAG, "Processing 0x83 frame as engineering data: %s", hex_buf);
-  }
-  
-  // For 0x83 frames in engineering mode, the energy values start at byte 13
-  // Energy values are the same values that would be "distance" in normal mode
-  const size_t motion_energy_start = 13;  // Start offset for energy values
-  const size_t motion_gate_count = DEFAULT_GATES;    // Should use DEFAULT_GATES for consistency
-  
-  // Ensure we have enough data
-  if (frame_data.size() < motion_energy_start + 4) {
-    ESP_LOGW(TAG, "Frame too short for energy data");
-    return false;
-  }
-  
-  // Process each gate's energy value
-  for (uint8_t i = 0; i < motion_gate_count; i++) {
-    size_t offset = motion_energy_start + (i * 4);
-    
-    // Make sure we have enough data for this gate
-    if (offset + 3 >= frame_data.size()) {
-      ESP_LOGW(TAG, "Engineering frame truncated at gate %d", i);
-      break;
-    }
-    
-    // Extract 32-bit energy value (little-endian)
-    uint32_t raw_energy = frame_data[offset] | 
-                        (frame_data[offset+1] << 8) | 
-                        (frame_data[offset+2] << 16) | 
-                        (frame_data[offset+3] << 24);
-    
-    // Convert raw energy to dB as per manual: dB = 10 * log10(raw_value)
-    // Only calculate for non-zero values to avoid log(0)
-    float db_energy = 0;
-    if (raw_energy > 0) {
-      db_energy = 10.0f * log10f(raw_energy);
-    }
-    
-    // Calculate approximate distance for this gate
-    float gate_start_distance = i * DISTANCE_GATE_SIZE;
-    float gate_end_distance = gate_start_distance + DISTANCE_GATE_SIZE;
-    
-    // Update sensor if configured for this gate and not throttled
-    if (!throttled && i < energy_gate_sensors_.size() && energy_gate_sensors_[i] != nullptr) {
-      energy_gate_sensors_[i]->publish_state(db_energy);
-      
-      // Only log gate data when not throttled
-      ESP_LOGI(TAG, "Gate %d (%.1f-%.1f m) energy: %.1f dB (raw: %u)", 
-              i, gate_start_distance, gate_end_distance, db_energy, raw_energy);
-    }
-  }
-  
-  // Update the throttle timestamp if we weren't throttled
-  if (!throttled) {
-    last_engineering_update_ = now;
-  }
-  
   return true;
 }
 
-// Add new method to process engineering data
-bool HLKLD2402Component::process_engineering_data_(const std::vector<uint8_t> &frame_data) {
-  // Early exit if engineering data processing is not enabled
-  if (!engineering_data_enabled_) {
-    ESP_LOGD(TAG, "Engineering data processing disabled");
-    return false;
-  }
-  
-  if (energy_gate_sensors_.empty()) {
-    ESP_LOGD(TAG, "No energy gate sensors configured");
-    return false;
-  }
-  
-  // Make sure we're in engineering mode
-  // NOTE: Changed this to be more permissive - removed strict config_mode check
-  if (operating_mode_ != "Engineering") {
-    ESP_LOGW(TAG, "Received engineering data frame but not in engineering mode! Current mode: %s", 
-            operating_mode_.c_str());
-    return false;
-  }
-
-  // Ensure the frame is at least the minimum expected length
-  // Header (5) + Length (2) + Some data
-  if (frame_data.size() < 10) {
-    ESP_LOGW(TAG, "Engineering frame too short: %d bytes", frame_data.size());
-    return false;
-  }
-  
-  // Check throttling - only log and update sensors if enough time has passed
-  uint32_t now = millis();
-  bool throttled = (now - last_engineering_update_ < engineering_throttle_ms_);
-  
-  if (!throttled) {
-    // Only log the frame when not throttled
-    char hex_buf[128] = {0};
-    for (size_t i = 0; i < std::min(frame_data.size(), size_t(40)); i++) {
-      sprintf(hex_buf + (i*3), "%02X ", frame_data[i]);
-    }
-    ESP_LOGI(TAG, "Engineering frame received: %s", hex_buf);
-  }
-  
-  // Verify frame type is engineering data (0x84)
-  if (frame_data.size() >= 5 && frame_data[4] != DATA_FRAME_TYPE_ENGINEERING) {
-    ESP_LOGW(TAG, "Not an engineering data frame: 0x%02X", frame_data[4]);
-    return false;
-  }
-
-  // Process each gate's energy value
-  const size_t motion_energy_start = 10;
-  const size_t motion_gate_count = DEFAULT_GATES; // Uses DEFAULT_GATES gates from the constant
-  
-  for (uint8_t i = 0; i < motion_gate_count; i++) {
-    size_t offset = motion_energy_start + (i * 4);
-    
-    // Make sure we have enough data for this gate
-    if (offset + 3 >= frame_data.size()) {
-      ESP_LOGW(TAG, "Engineering frame truncated at gate %d", i);
-      break;
-    }
-    
-    // Extract 32-bit energy value (little-endian)
-    uint32_t raw_energy = frame_data[offset] | 
-                        (frame_data[offset+1] << 8) | 
-                        (frame_data[offset+2] << 16) | 
-                        (frame_data[offset+3] << 24);
-    
-    // Convert raw energy to dB as per manual: dB = 10 * log10(raw_value)
-    float db_energy = 0;
-    if (raw_energy > 0) { // Avoid log10(0)
-      db_energy = 10.0f * log10f(raw_energy);
-    }
-    
-    // Calculate approximate distance for this gate
-    float gate_start_distance = i * DISTANCE_GATE_SIZE;
-    float gate_end_distance = gate_start_distance + DISTANCE_GATE_SIZE;
-    
-    // Update sensor if configured for this gate and not throttled
-    if (!throttled && i < energy_gate_sensors_.size() && energy_gate_sensors_[i] != nullptr) {
-      energy_gate_sensors_[i]->publish_state(db_energy);
-      
-      // Only log gate data when not throttled
-      ESP_LOGI(TAG, "Gate %d (%.1f-%.1f m) energy: %.1f dB (raw: %u)", 
-              i, gate_start_distance, gate_end_distance, db_energy, raw_energy);
-    }
-  }
-  
-  // Update the throttle timestamp if we weren't throttled
-  if (!throttled) {
-    last_engineering_update_ = now;
-  }
-  
-  return true;
-}
-
-// Create a separate method for updating binary sensors to avoid code duplication
 void HLKLD2402Component::update_binary_sensors_(float distance_cm) {
   // Update presence states based on documented ranges
   if (this->presence_binary_sensor_ != nullptr) {

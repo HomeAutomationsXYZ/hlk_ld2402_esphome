@@ -223,8 +223,42 @@ void test_exit_retry_and_recovery() {
   assert(attempts == 2);
 }
 
+void test_engineering_reports() {
+  // Manufacturer V1.08 example: 102 cm, first motion=4598, first micro=206769.
+  std::vector<uint8_t> frame(141, 0);
+  frame[0]=0xF4; frame[1]=0xF3; frame[2]=0xF2; frame[3]=0xF1;
+  frame[4]=131; frame[6]=1; frame[7]=102;
+  frame[9]=0xF6; frame[10]=0x11;
+  frame[73]=0xB1; frame[74]=0x27; frame[75]=3;
+  for (int i=0;i<4;i++) frame[137+i]=0xF8-i;
+  for (size_t split=1;split<frame.size();split++) {
+    HLKLD2402Component radar; prepare(radar); test_time=10000;
+    sensor::Sensor energy, distance;
+    binary_sensor::BinarySensor presence, micro;
+    radar.set_energy_gate_sensor(0,&energy); radar.set_distance_sensor(&distance);
+    radar.set_presence_binary_sensor(&presence); radar.set_micromovement_binary_sensor(&micro);
+    radar.feed(std::vector<uint8_t>(frame.begin(),frame.begin()+split)); radar.loop();
+    assert(presence.values.empty());
+    radar.feed(std::vector<uint8_t>(frame.begin()+split,frame.end())); radar.loop();
+    assert(presence.values.back() && !micro.values.back());
+    assert(distance.values.back()==102);
+    assert(energy.values.back()>36.61f && energy.values.back()<36.63f);
+    auto stationary=frame; stationary[6]=2;
+    auto absent=frame; absent[6]=0;
+    radar.feed(stationary); radar.feed(absent); radar.loop();
+    assert(micro.values[micro.values.size()-2] && !micro.values.back());
+    assert(!presence.values.back() && radar.report_buffer_.empty());
+    auto bad=frame; bad.back()=0;
+    const size_t before=presence.values.size();
+    radar.feed(bad); radar.loop(); assert(presence.values.size()==before);
+    radar.feed(std::vector<uint8_t>(frame.begin(),frame.begin()+50)); radar.loop();
+    test_time+=101; radar.feed(frame); radar.loop(); assert(presence.values.back());
+  }
+}
+
 int main() {
   for (int failure = 0; failure < 5; failure++) test_apply_settings(failure);
+  test_engineering_reports();
   test_exit_retry_and_recovery();
   test_parameter_readback();
   test_active_version();
@@ -237,5 +271,5 @@ int main() {
   test_passive_version();
   for (bool sensor : {false, true})
     for (bool legacy : {false, true}) test_calibration(sensor, legacy);
-  std::cout << "All 21 component regression cases passed.\n";
+  std::cout << "All component regression cases passed, including 140 engineering frame splits.\n";
 }

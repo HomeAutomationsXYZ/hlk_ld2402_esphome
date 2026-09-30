@@ -104,3 +104,22 @@ only send exit commands, never repeat writes or saves. If exit remains unconfirm
 **Normal Mode** retries exit even when the cached output mode is already Normal.
 Missing exit ACKs can block the action for about 3.5 seconds; this recovery path is
 still synchronous. A save ACK alone does not prove post-power-cycle persistence.
+
+
+## Engineering capture
+
+Engineering reports use payload length 0x0083, not a frame-type byte. The decoder
+buffers all 141 bytes across UART reads, validates the footer/status, and reads
+16 motion energies at offset 9 and 16 micro/static energies at offset 73.
+Every two seconds, `RADAR ENERGY` logs status/distance followed by 16 `ENERGY`
+lines containing both raw energies and dB. Zero energy is reported as -inf dB.
+Existing energy sensors expose motion energy; micro/static energy is in the logs.
+Binary status 2 drives the Micromovement entity in engineering mode. Normal text
+mode still has no separate stationary classification and retains its legacy
+range-based Micromovement entity; do not compare those entity semantics across modes.
+
+Capture 60 seconds empty, 60 seconds standing still at the test position, and
+60 seconds empty after departure. Do not change thresholds during capture. Return
+to Normal Mode afterward. Tests cover every split boundary, adjacent reports,
+bad footers, incomplete-frame timeout, and reported detection status. Actual device
+capture is still required to validate firmware behaviour.
