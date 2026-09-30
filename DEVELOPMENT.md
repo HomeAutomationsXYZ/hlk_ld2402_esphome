@@ -59,3 +59,28 @@ Blocking command waits also remain. A later change should centralize response
 validation and introduce a nonblocking command queue with deadlines. Native
 tests do not establish compatibility with physical hardware or all ESPHome
 versions.
+
+
+## Read-only hardware diagnostics
+
+Install the current branch and press **Read Radar Diagnostics** in Normal mode,
+after calibration has finished. Capture ESPHome logs from `RADAR DIAGNOSTICS BEGIN`
+through `RADAR DIAGNOSTICS END`. This reads the current hardware maximum distance,
+disappearance delay, and all 16 motion and micromotion threshold values (raw and dB).
+It enters/exits configuration mode but never writes parameters or saves flash.
+Detection may pause briefly during the synchronous read. A failed exit is reported;
+select Normal mode before retrying. These are current settings, not proof of flash persistence.
+
+The YAML `max_distance` and `timeout` options currently only store component values;
+they do not program the radar. Diagnostics print them separately for comparison.
+Zero raw threshold has a logarithmic value of negative infinity; use the raw value.
+Only documented threshold ranges 0x0010–0x001F and 0x0030–0x003F are queried.
+
+Readback follows the manufacturer's [LD2402 V1.08 manual, sections 5.2.6–5.2.7](https://h.hlktech.com/download/HLK-LD2402-24G/1/HLK-LD2402%E7%94%A8%E6%88%B7%E6%89%8B%E5%86%8C%20V1.08%20.pdf).
+Parameter requests contain IDs without a count prefix. Replies are length-delimited,
+validated for command/ACK/footer, and decoded after the ACK. Readbacks and active
+firmware queries use this stricter reader; older command paths still use the legacy reader.
+
+For template threshold numbers, use `set_action` and its `x` value to write only on
+explicit user changes. Do not attach writes to `on_value`, which also runs when
+publishing a number's state. Read buttons should update threshold sensors only.

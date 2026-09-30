@@ -96,12 +96,95 @@ void test_calibration(bool with_sensor, bool legacy_format) {
   if (with_sensor) assert(progress.values.back() == 100);
 }
 
+std::vector<uint8_t> reply(uint16_t command, std::vector<uint8_t> payload, uint16_t status = 0) {
+  const size_t length = payload.size() + 4;
+  std::vector<uint8_t> frame = {0xFD,0xFC,0xFB,0xFA,uint8_t(length),uint8_t(length >> 8),
+                              uint8_t(command),1,uint8_t(status),uint8_t(status >> 8)};
+  frame.insert(frame.end(), payload.begin(), payload.end());
+  frame.insert(frame.end(), {4,3,2,1});
+  return frame;
+}
+
+void test_parameter_readback() {
+  HLKLD2402Component radar;
+  radar.on_write = [&](const std::vector<uint8_t> &frame) {
+    assert(frame == std::vector<uint8_t>({0xFD,0xFC,0xFB,0xFA,6,0,8,0,1,0,4,0,4,3,2,1}));
+    radar.feed(reply(CMD_GET_VERSION, {})); // Unrelated stale reply must be skipped.
+    radar.feed(reply(CMD_GET_PARAMS, {100,0,0,0,4,3,2,1})); // Embedded footer is a value.
+  };
+  std::vector<uint32_t> values;
+  assert(radar.get_parameters_batch_({1,4}, values));
+  assert(values == std::vector<uint32_t>({100,0x01020304}));
+  for (int failure = 0; failure < 5; failure++) {
+    radar.on_write = [&](const std::vector<uint8_t> &) {
+      auto frame = reply(CMD_GET_PARAMS, {1,0,0,128}, failure == 0 ? 1 : 0);
+      if (failure == 1) frame.back() = 0; // Wrong footer.
+      if (failure == 2) frame.resize(11); // Truncated frame.
+      if (failure == 3) frame[4] = 255; // Too long for supplied data.
+      if (failure == 4) frame = reply(CMD_GET_PARAMS, {1,0}); // Short value.
+      radar.feed(frame);
+    };
+    uint32_t value = 99;
+    assert(!radar.get_parameter_(1, value));
+    assert(value == 99);
+  }
+  radar.on_write = [&](const std::vector<uint8_t> &) {radar.feed(reply(CMD_GET_PARAMS, {1,0,0,128}));};
+  uint32_t value = 0;
+  assert(radar.get_parameter_(1, value) && value == 0x80000001u);
+}
+
+void test_diagnostics(bool fail_read, bool fail_exit) {
+  HLKLD2402Component radar;
+  radar.on_write = [&](const std::vector<uint8_t> &frame) {
+    const uint16_t cmd = frame[6] | (uint16_t(frame[7]) << 8);
+    assert(cmd == CMD_ENABLE_CONFIG || cmd == CMD_DISABLE_CONFIG || cmd == CMD_GET_PARAMS);
+    if (cmd == CMD_GET_PARAMS) {
+      const size_t count = (frame.size() - 12) / 2;
+      std::vector<uint8_t> data(count * 4, 0);
+      for (size_t i = 0; i < count; i++) data[i * 4] = 100;
+      radar.feed(reply(cmd, data, fail_read ? 1 : 0));
+    } else if (!(cmd == CMD_DISABLE_CONFIG && fail_exit)) radar.feed(reply(cmd, {}));
+  };
+  assert(radar.read_radar_diagnostics() == (!fail_read && !fail_exit));
+  assert(radar.tx.back()[6] == CMD_DISABLE_CONFIG);
+  assert(radar.config_mode_ == fail_exit);
+  assert(radar.tx.size() == (fail_read ? 3 : 7));
+  radar.tx.clear();
+  radar.calibration_in_progress_ = true;
+  assert(!radar.read_radar_diagnostics() && radar.tx.empty());
+}
+
+void test_diagnostic_entry_failure() {
+  HLKLD2402Component radar;
+  radar.on_write = [&](const std::vector<uint8_t> &frame) {
+    assert(frame[6] == CMD_ENABLE_CONFIG || frame[6] == CMD_DISABLE_CONFIG);
+    if (frame[6] == CMD_DISABLE_CONFIG) radar.feed(reply(CMD_DISABLE_CONFIG, {}));
+  };
+  assert(!radar.read_radar_diagnostics());
+  assert(!radar.config_mode_ && radar.tx.size() == 2);
+}
+
+void test_active_version() {
+  HLKLD2402Component radar;
+  radar.config_mode_ = true;
+  radar.on_write = [&](const std::vector<uint8_t> &) {
+    radar.feed(reply(CMD_GET_VERSION, {6,0,'v','3','.','3','.','5'}));
+  };
+  radar.get_firmware_version_();
+  assert(radar.firmware_version_ == "v3.3.5");
+}
+
 int main() {
+  test_parameter_readback();
+  test_active_version();
+  test_diagnostic_entry_failure();
+  for (bool fail_read : {false,true})
+    for (bool fail_exit : {false,true}) test_diagnostics(fail_read, fail_exit);
   test_events_and_throttling();
   test_fragmented_text_and_instances();
   test_header_mismatch();
   test_passive_version();
   for (bool sensor : {false, true})
     for (bool legacy : {false, true}) test_calibration(sensor, legacy);
-  std::cout << "All 8 component regression cases passed.\n";
+  std::cout << "All 15 component regression cases passed.\n";
 }

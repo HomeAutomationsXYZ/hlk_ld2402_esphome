@@ -92,6 +92,12 @@ sensor:
 # Only include essential calibration button
 button:
   - platform: template
+    name: "Read Radar Diagnostics"
+    entity_category: diagnostic
+    on_press:
+      - lambda: id(radar_sensor).read_radar_diagnostics();
+
+  - platform: template
     name: "Calibrate"
     icon: "mdi:radar"
     on_press:

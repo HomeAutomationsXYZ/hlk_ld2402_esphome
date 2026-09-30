@@ -128,13 +128,13 @@ void HLKLD2402Component::get_firmware_version_() {
     delay(300);
     
     std::vector<uint8_t> response;
-    if (read_response_(response, 1000)) {
+    if (read_command_reply_(CMD_GET_VERSION, response)) {
       // According to the protocol, response format: 
       // version_length (2 bytes) + version_string (N bytes)
       if (response.size() >= 2) {
         uint16_t version_length = response[0] | (response[1] << 8);
         
-        if (response.size() >= 2 + version_length && version_length > 0) {
+        if (response.size() == 2 + version_length && version_length > 0) {
           std::string version;
           // Extract version string
           for (size_t i = 2; i < 2 + version_length; i++) {
@@ -1098,56 +1098,60 @@ bool HLKLD2402Component::read_response_(std::vector<uint8_t> &response, uint32_t
   return false;
 }
 
-// Modify get_parameter_ to use a longer timeout for power interference parameter
+// Decode single and batch parameter reads through the same validated path.
 bool HLKLD2402Component::get_parameter_(uint16_t param_id, uint32_t &value) {
-  ESP_LOGD(TAG, "Getting parameter 0x%04X", param_id);
-  
-  uint8_t data[2];
-  data[0] = param_id & 0xFF;
-  data[1] = (param_id >> 8) & 0xFF;
-  
-  if (!send_command_(CMD_GET_PARAMS, data, sizeof(data))) {
-    ESP_LOGE(TAG, "Failed to send get parameter command");
-    return false;
-  }
-  
-  // Add a bigger delay for parameter 0x0005 (power interference)
-  if (param_id == PARAM_POWER_INTERFERENCE) {
-    delay(500);  // Wait longer for power interference parameter
-  } else {
-    delay(100);  // Standard delay for other parameters
-  }
-  
-  std::vector<uint8_t> response;
-  // Use longer timeout for power interference parameter
-  uint32_t timeout = (param_id == PARAM_POWER_INTERFERENCE) ? 3000 : 1000;
-  
-  if (!read_response_(response, timeout)) {
-    ESP_LOGE(TAG, "No response to get parameter command");
-    return false;
-  }
-  
-  // Log the response for debugging
-  char hex_buf[64] = {0};
-  for (size_t i = 0; i < response.size() && i < 16; i++) {
-    sprintf(hex_buf + (i*3), "%02X ", response[i]);
-  }
-  ESP_LOGD(TAG, "Get parameter response: %s", hex_buf);
-  
-  // Handle response in a permissive way
-  if (response.size() >= 6) {
-    // Standard response format
-    value = response[2] | (response[3] << 8) | (response[4] << 16) | (response[5] << 24);
-    ESP_LOGD(TAG, "Parameter 0x%04X value: %u", param_id, value);
+  std::vector<uint32_t> values;
+  if (!get_parameters_batch_({param_id}, values)) return false;
+  value = values[0];
+  return true;
+}
+
+// Length-delimited command replies. Payload bytes may contain the frame footer.
+bool HLKLD2402Component::read_command_reply_(uint16_t command, std::vector<uint8_t> &payload) {
+  payload.clear();
+  const uint32_t start = millis();
+  uint8_t matched = 0;
+  std::vector<uint8_t> frame;
+  size_t expected = 0;
+  while (millis() - start < 1000) {
+    if (!available()) { yield(); continue; }
+    uint8_t c;
+    if (!read_byte(&c)) continue;
+    if (matched < 4) {
+      matched = c == FRAME_HEADER[matched] ? matched + 1 : (c == FRAME_HEADER[0] ? 1 : 0);
+      continue;
+    }
+    frame.push_back(c);
+    if (frame.size() == 2) {
+      const size_t length = frame[0] | (uint16_t(frame[1]) << 8);
+      if (length < 4 || length > 256) {
+        ESP_LOGW(TAG, "Invalid reply length: %u", unsigned(length));
+        return false;
+      }
+      expected = 2 + length + 4;
+    }
+    if (!expected || frame.size() < expected) continue;
+    for (size_t i = 0; i < 4; i++) {
+      if (frame[expected - 4 + i] != FRAME_FOOTER[i]) {
+        ESP_LOGW(TAG, "Invalid reply footer");
+        return false;
+      }
+    }
+    const uint16_t reply = frame[2] | (uint16_t(frame[3]) << 8);
+    if (reply != (command | 0x0100)) {
+      ESP_LOGW(TAG, "Ignoring unrelated reply 0x%04X", reply);
+      matched = 0; frame.clear(); expected = 0;
+      continue;
+    }
+    const uint16_t status = frame[4] | (uint16_t(frame[5]) << 8);
+    if (status != 0) {
+      ESP_LOGW(TAG, "Command 0x%04X failed: ACK %u", command, status);
+      return false;
+    }
+    payload.assign(frame.begin() + 6, frame.end() - 4);
     return true;
-  } else if (response.size() >= 2) {
-    // Shorter response, but possibly valid - use first 2 bytes
-    value = response[0] | (response[1] << 8);
-    ESP_LOGW(TAG, "Short parameter response, using value: %u", value);
-    return true;
   }
-  
-  ESP_LOGE(TAG, "Invalid parameter response format");
+  ESP_LOGW(TAG, "No valid reply for command 0x%04X", command);
   return false;
 }
 
@@ -2151,60 +2155,72 @@ bool HLKLD2402Component::set_micromotion_threshold(uint8_t gate, float db_value)
 
 // Add a new method for batch parameter reading
 bool HLKLD2402Component::get_parameters_batch_(const std::vector<uint16_t> &param_ids, std::vector<uint32_t> &values) {
-  ESP_LOGI(TAG, "Reading %d parameters in batch mode", param_ids.size());
-  
-  // Prepare data: length of IDs array (2 bytes) followed by param IDs
-  std::vector<uint8_t> data;
-  uint16_t count = param_ids.size();
-  data.push_back(count & 0xFF);
-  data.push_back((count >> 8) & 0xFF);
-  
-  for (uint16_t id : param_ids) {
-    data.push_back(id & 0xFF);
-    data.push_back((id >> 8) & 0xFF);
-  }
-  
-  if (!send_command_(CMD_GET_PARAMS, data.data(), data.size())) {
-    ESP_LOGE(TAG, "Failed to send batch parameter query");
-    return false;
-  }
-  
-  // Wait for response
-  delay(200);
-  
-  std::vector<uint8_t> response;
-  if (!read_response_(response, 2000)) {
-    ESP_LOGE(TAG, "No response to batch parameter query");
-    return false;
-  }
-  
-  // Log the response
-  char hex_buf[128] = {0};
-  for (size_t i = 0; i < response.size() && i < 30; i++) {
-    sprintf(hex_buf + (i*3), "%02X ", response[i]);
-  }
-  ESP_LOGI(TAG, "Batch parameter response: %s", hex_buf);
-  
-  // Based on the serial capture, each 4-byte value is returned sequentially
-  // The format should match what we saw in the capture
-  if (response.size() >= param_ids.size() * 4) {
-    values.clear();
-    
-    for (size_t i = 0; i < param_ids.size(); i++) {
-      size_t offset = i * 4;
-      uint32_t value = response[offset] | 
-                      (response[offset+1] << 8) | 
-                      (response[offset+2] << 16) | 
-                      (response[offset+3] << 24);
-      
-      values.push_back(value);
-      ESP_LOGI(TAG, "Parameter 0x%04X value: %u (0x%08X)", param_ids[i], value, value);
+  values.clear();
+  if (param_ids.empty()) return false;
+  std::vector<uint32_t> decoded;
+  // Small requests also fit firmware with a 32-byte command buffer.
+  for (size_t first = 0; first < param_ids.size(); first += 8) {
+    const size_t count = std::min(size_t(8), param_ids.size() - first);
+    std::vector<uint8_t> data;
+    for (size_t i = first; i < first + count; i++) {
+      data.push_back(param_ids[i] & 0xFF);
+      data.push_back(param_ids[i] >> 8);
     }
-    return true;
+    std::vector<uint8_t> payload;
+    if (!send_command_(CMD_GET_PARAMS, data.data(), data.size()) ||
+        !read_command_reply_(CMD_GET_PARAMS, payload)) return false;
+    if (payload.size() != count * 4) {
+      ESP_LOGW(TAG, "Parameter reply has %u bytes; expected %u", unsigned(payload.size()), unsigned(count * 4));
+      return false;
+    }
+    for (size_t i = 0; i < count; i++) {
+      const size_t j = i * 4;
+      decoded.push_back(uint32_t(payload[j]) | (uint32_t(payload[j+1]) << 8) |
+                        (uint32_t(payload[j+2]) << 16) | (uint32_t(payload[j+3]) << 24));
+    }
   }
-  
-  ESP_LOGE(TAG, "Invalid batch parameter response format or insufficient data");
-  return false;
+  values.swap(decoded);
+  return true;
+}
+
+bool HLKLD2402Component::read_radar_diagnostics() {
+  if (calibration_in_progress_ || config_mode_ || operating_mode_ != "Normal") {
+    ESP_LOGW(TAG, "Diagnostics require idle Normal mode; finish calibration or select Normal mode first");
+    return false;
+  }
+  // Use validated ACKs for this read-only session, including entry and exit.
+  while (available()) { uint8_t c; read_byte(&c); }
+  std::vector<uint8_t> payload;
+  ESP_LOGI(TAG, "RADAR DIAGNOSTICS BEGIN (current hardware settings)");
+  bool success = send_command_(CMD_ENABLE_CONFIG) && read_command_reply_(CMD_ENABLE_CONFIG, payload);
+  if (success) {
+    config_mode_ = true;
+    std::vector<uint32_t> values;
+    success = get_parameters_batch_({PARAM_MAX_DISTANCE, PARAM_TIMEOUT}, values);
+    if (success) {
+      ESP_LOGI(TAG, "Hardware max distance: %.1f m (raw %lu); timeout: %lu s",
+               values[0] / 10.0f, (unsigned long) values[0], (unsigned long) values[1]);
+      ESP_LOGI(TAG, "YAML max distance: %.1f m; timeout: %lu s (these options do not program hardware)",
+               max_distance_, (unsigned long) timeout_);
+    }
+    for (uint16_t base : {PARAM_TRIGGER_THRESHOLD, PARAM_MICRO_THRESHOLD}) {
+      if (!success) break;
+      std::vector<uint16_t> ids;
+      for (uint16_t gate = 0; gate < 16; gate++) ids.push_back(base + gate);
+      success = get_parameters_batch_(ids, values);
+      if (!success) break;
+      for (size_t gate = 0; gate < values.size(); gate++) {
+        ESP_LOGI(TAG, "Threshold parameter 0x%04X gate %u: raw=%lu, %.2f dB",
+                 unsigned(base + gate), unsigned(gate), (unsigned long) values[gate], threshold_to_db_(values[gate]));
+      }
+    }
+  }
+  // Attempt exit even after an entry ACK timeout: the radar may have received entry.
+  const bool exited = send_command_(CMD_DISABLE_CONFIG) && read_command_reply_(CMD_DISABLE_CONFIG, payload);
+  config_mode_ = !exited;
+  ESP_LOGI(TAG, "RADAR DIAGNOSTICS END: %s; config exit %s",
+           success ? "read complete" : "read FAILED", exited ? "confirmed" : "FAILED");
+  return success && exited;
 }
 
 // Method to read all motion thresholds in one call

@@ -595,6 +595,12 @@ text_sensor:
 # Control buttons - using template buttons 
 button:
   - platform: template
+    name: "Read Radar Diagnostics"
+    entity_category: diagnostic
+    on_press:
+      - lambda: id(radar_sensor).read_radar_diagnostics();
+
+  - platform: template
     name: "Calibrate"
     on_press:
       - lambda: id(radar_sensor).calibrate();
