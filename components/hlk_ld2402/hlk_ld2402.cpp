@@ -575,9 +575,9 @@ bool HLKLD2402Component::process_report_(const std::vector<uint8_t> &frame) {
 }
 
 void HLKLD2402Component::update_binary_sensors_(float distance_cm) {
-  // Update presence states based on documented ranges
+  // Follow the radar target report; range limiting belongs to the radar configuration.
   if (this->presence_binary_sensor_ != nullptr) {
-    bool is_presence = distance_cm <= (STATIC_RANGE * 100);
+    bool is_presence = std::isfinite(distance_cm) && distance_cm > 0;
     this->presence_binary_sensor_->publish_state(is_presence);
   }
   

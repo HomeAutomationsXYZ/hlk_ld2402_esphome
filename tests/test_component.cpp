@@ -256,8 +256,28 @@ void test_engineering_reports() {
   }
 }
 
+void test_presence_beyond_five_metres() {
+  HLKLD2402Component radar;
+  prepare(radar);
+  radar.set_max_distance(6.0f);
+  binary_sensor::BinarySensor presence;
+  radar.set_presence_binary_sensor(&presence);
+  for (const char *line : {"distance:490", "distance:510", "distance:599", "distance:662"}) {
+    radar.process_line_(line);
+    assert(presence.values.back());
+  }
+  // A local range setting must not contradict a target still reported by hardware.
+  radar.process_line_("OFF");
+  assert(!presence.values.back());
+  radar.process_line_("distance:550");
+  assert(presence.values.back());
+  radar.process_line_("distance:0");
+  assert(!presence.values.back());
+}
+
 int main() {
   for (int failure = 0; failure < 5; failure++) test_apply_settings(failure);
+  test_presence_beyond_five_metres();
   test_engineering_reports();
   test_exit_retry_and_recovery();
   test_parameter_readback();

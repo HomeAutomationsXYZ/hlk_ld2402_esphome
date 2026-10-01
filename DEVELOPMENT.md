@@ -123,3 +123,10 @@ Capture 60 seconds empty, 60 seconds standing still at the test position, and
 to Normal Mode afterward. Tests cover every split boundary, adjacent reports,
 bad footers, incomplete-frame timeout, and reported detection status. Actual device
 capture is still required to validate firmware behaviour.
+
+
+Normal-mode Presence follows positive finite distance reports at any range and
+clears on OFF (or zero distance). It no longer uses the erroneous 5 m static-range
+cutoff. Hardware range is configured separately through Apply Detection Settings.
+This does not change the legacy Normal-mode Micromovement semantics. Regression
+coverage checks crossing 5 m, detection beyond the local range option, and OFF.
